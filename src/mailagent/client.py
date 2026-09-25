@@ -229,6 +229,26 @@ class Gmail:
         resp = self._svc.users().labels().list(userId="me").execute()
         return resp.get("labels", [])
 
+    def ensure_label(self, name: str) -> str:
+        """Return the id of a label, creating it if it doesn't exist."""
+        for label in self.labels():
+            if label["name"].lower() == name.lower():
+                return label["id"]
+        created = (
+            self._svc.users()
+            .labels()
+            .create(
+                userId="me",
+                body={
+                    "name": name,
+                    "labelListVisibility": "labelShow",
+                    "messageListVisibility": "show",
+                },
+            )
+            .execute()
+        )
+        return created["id"]
+
     def profile(self) -> dict:
         return self._svc.users().getProfile(userId="me").execute()
 

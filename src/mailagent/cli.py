@@ -155,6 +155,24 @@ def send_cmd(to: str, subject: str, body: str | None, cc: str | None, yes: bool)
     click.echo(f"sent {_gmail().send(to, subject, text, cc=cc)}")
 
 
+@main.command("label")
+@click.argument("name")
+@click.argument("message_ids", nargs=-1, required=True)
+@click.option("--archive", is_flag=True, help="Also remove from the inbox.")
+@click.option("-y", "--yes", is_flag=True)
+def label_cmd(name: str, message_ids: tuple[str, ...], archive: bool, yes: bool) -> None:
+    """Apply a label to messages, creating it if needed."""
+    what = f"Label {len(message_ids)} message(s) '{name}'"
+    _confirm(what + (" and archive?" if archive else "?"), yes)
+    gmail = _gmail()
+    label_id = gmail.ensure_label(name)
+    for mid in message_ids:
+        gmail.add_label(mid, label_id)
+        if archive:
+            gmail.archive(mid)
+    click.echo(f"{what.lower()}{' and archived' if archive else ''}: done")
+
+
 # ---- unsubscribe ---------------------------------------------------------
 
 
