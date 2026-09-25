@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+
+# Never commit credentials or tokens
+credentials.json
+token.json
+*.token
