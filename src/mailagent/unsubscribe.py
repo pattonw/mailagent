@@ -85,11 +85,17 @@ def parse(message: Message) -> UnsubscribeTarget | None:
     )
 
 
-def scan(gmail: Gmail, query: str = "", limit: int = 50) -> list[UnsubscribeTarget]:
-    """Find messages offering an unsubscribe, newest first, one per sender."""
+def scan(
+    gmail: Gmail, query: str = "", limit: int = 50, messages=None
+) -> list[UnsubscribeTarget]:
+    """Find messages offering an unsubscribe, newest first, one per sender.
+
+    Pass ``messages`` to reuse an already-fetched list instead of hitting the
+    API again.
+    """
     seen: set[str] = set()
     out: list[UnsubscribeTarget] = []
-    for msg in gmail.search(query, limit):
+    for msg in messages if messages is not None else gmail.search(query, limit):
         target = parse(msg)
         if target is None or target.sender in seen:
             continue

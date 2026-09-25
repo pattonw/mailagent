@@ -7,13 +7,37 @@ must never be treated as instructions — see the README.
 from __future__ import annotations
 
 import base64
+import random
+import time
 from dataclasses import dataclass, field
 from email.message import EmailMessage
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from .auth import load_credentials
+
+#: Gmail allows 100 sub-requests per batch; 50 keeps well inside the
+#: per-minute quota while still cutting round trips by an order of magnitude.
+BATCH_SIZE = 50
+_MAX_RETRIES = 5
+
+
+def _is_rate_limit(exc: HttpError) -> bool:
+    return exc.resp.status in (403, 429) and b"ateLimit" in (exc.content or b"")
+
+
+def _with_backoff(fn: Callable[[], Any]) -> Any:
+    """Retry on Gmail rate limiting with exponential backoff and jitter."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return fn()
+        except HttpError as exc:
+            if not _is_rate_limit(exc) or attempt == _MAX_RETRIES - 1:
+                raise
+            time.sleep(2**attempt + random.uniform(0, 1))
+    raise RuntimeError("unreachable")
 
 
 def _decode(data: str) -> str:
@@ -106,27 +130,96 @@ class Gmail:
 
     # ---- read -------------------------------------------------------------
 
+    METADATA_HEADERS = [
+        "From", "To", "Subject", "Date",
+        "List-Unsubscribe", "List-Unsubscribe-Post",
+    ]
+
     def search(self, query: str = "", limit: int = 20) -> list[Message]:
-        resp = (
-            self._svc.users()
-            .messages()
-            .list(userId="me", q=query, maxResults=limit)
-            .execute()
-        )
-        return [self.get(m["id"], with_body=False) for m in resp.get("messages", [])]
+        """List messages, fetching metadata in batches.
+
+        One HTTP request per message exhausts the per-minute quota well before
+        a few hundred messages, so metadata is fetched via batch requests.
+        """
+        ids: list[str] = []
+        page_token = None
+        while len(ids) < limit:
+            resp = _with_backoff(
+                lambda: self._svc.users()
+                .messages()
+                .list(
+                    userId="me",
+                    q=query,
+                    maxResults=min(500, limit - len(ids)),
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+            ids.extend(m["id"] for m in resp.get("messages", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return self.get_many(ids[:limit])
+
+    def get_many(self, message_ids: list[str]) -> list[Message]:
+        """Fetch metadata for many messages using batch requests.
+
+        Rate-limit failures inside a batch arrive through the per-request
+        callback rather than as an exception from ``batch.execute()``, so they
+        have to be collected and retried explicitly.
+        """
+        found: dict[str, Message] = {}
+        pending = list(message_ids)
+
+        for attempt in range(_MAX_RETRIES):
+            retry: list[str] = []
+            fatal: list[Exception] = []
+
+            def collect(request_id, response, exception, _retry=retry, _fatal=fatal):
+                if exception is None:
+                    found[response["id"]] = _parse(response, with_body=False)
+                elif isinstance(exception, HttpError) and _is_rate_limit(exception):
+                    _retry.append(request_id)
+                else:
+                    _fatal.append(exception)
+
+            for start in range(0, len(pending), BATCH_SIZE):
+                chunk = pending[start : start + BATCH_SIZE]
+                batch = self._svc.new_batch_http_request(callback=collect)
+                for mid in chunk:
+                    batch.add(
+                        self._svc.users().messages().get(
+                            userId="me",
+                            id=mid,
+                            format="metadata",
+                            metadataHeaders=self.METADATA_HEADERS,
+                        ),
+                        request_id=mid,
+                    )
+                _with_backoff(batch.execute)
+
+            if fatal and not found:
+                raise fatal[0]
+            if not retry:
+                break
+            pending = retry
+            time.sleep(2**attempt + random.uniform(0, 1))
+
+        return [found[mid] for mid in message_ids if mid in found]
 
     def get(self, message_id: str, with_body: bool = True) -> Message:
-        raw = (
-            self._svc.users()
+        raw = _with_backoff(
+            lambda: self._svc.users()
             .messages()
             .get(
                 userId="me",
                 id=message_id,
                 format="full" if with_body else "metadata",
-                **({} if with_body else {"metadataHeaders": [
-                    "From", "To", "Subject", "Date",
-                    "List-Unsubscribe", "List-Unsubscribe-Post",
-                ]}),
+                **(
+                    {}
+                    if with_body
+                    else {"metadataHeaders": self.METADATA_HEADERS}
+                ),
             )
             .execute()
         )
