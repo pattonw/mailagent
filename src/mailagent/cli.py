@@ -76,6 +76,13 @@ def list_cmd(query: str, limit: int, as_json: bool) -> None:
         click.echo(f"{flag} {m.id}  {m.sender[:38]:<38}  {m.subject[:60]}")
 
 
+@main.command("count")
+@click.option("-q", "--query", default="", help="Gmail search query.")
+def count_cmd(query: str) -> None:
+    """Exact count of matching messages. Not the capped API estimate."""
+    click.echo(_gmail().count(query))
+
+
 @main.command("read")
 @click.argument("message_id")
 @click.option("--json", "as_json", is_flag=True)

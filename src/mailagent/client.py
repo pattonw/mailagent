@@ -24,6 +24,15 @@ BATCH_SIZE = 50
 _MAX_RETRIES = 5
 
 
+class IncompleteFetch(RuntimeError):
+    """Some messages could not be fetched. Carries what did come back."""
+
+    def __init__(self, msg: str, missing: list[str], partial: list):
+        super().__init__(msg)
+        self.missing = missing
+        self.partial = partial
+
+
 def _is_rate_limit(exc: HttpError) -> bool:
     return exc.resp.status in (403, 429) and b"ateLimit" in (exc.content or b"")
 
@@ -161,6 +170,25 @@ class Gmail:
                 break
         return self.get_many(ids[:limit])
 
+    def count(self, query: str = "") -> int:
+        """Exact number of matching messages.
+
+        ``resultSizeEstimate`` is capped and unreliable — it reports 501 for a
+        mailbox with a thousand matches — so this paginates.
+        """
+        n, token = 0, None
+        while True:
+            resp = _with_backoff(
+                lambda: self._svc.users()
+                .messages()
+                .list(userId="me", q=query, maxResults=500, pageToken=token)
+                .execute()
+            )
+            n += len(resp.get("messages", []))
+            token = resp.get("nextPageToken")
+            if not token:
+                return n
+
     def get_many(self, message_ids: list[str]) -> list[Message]:
         """Fetch metadata for many messages using batch requests.
 
@@ -205,7 +233,17 @@ class Gmail:
             pending = retry
             time.sleep(2**attempt + random.uniform(0, 1))
 
-        return [found[mid] for mid in message_ids if mid in found]
+        missing = [mid for mid in message_ids if mid not in found]
+        if missing:
+            # Silently returning a short list makes callers believe they have
+            # the whole mailbox when they don't.
+            raise IncompleteFetch(
+                f"{len(missing)} of {len(message_ids)} messages could not be "
+                f"fetched after {_MAX_RETRIES} attempts",
+                missing=missing,
+                partial=[found[mid] for mid in message_ids if mid in found],
+            )
+        return [found[mid] for mid in message_ids]
 
     def get(self, message_id: str, with_body: bool = True) -> Message:
         raw = _with_backoff(
