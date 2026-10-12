@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -49,9 +50,25 @@ def load_credentials(interactive: bool = False) -> Credentials:
         return creds
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _write_private(TOKEN_PATH, creds.to_json())
-        return creds
+        try:
+            creds.refresh(Request())
+            _write_private(TOKEN_PATH, creds.to_json())
+            return creds
+        except RefreshError as exc:
+            # A revoked or expired refresh token is not recoverable. Falling
+            # through to the interactive flow is the whole point of `auth`;
+            # raising here would make the fix-it command unusable.
+            if not interactive:
+                raise AuthError(
+                    "Stored token is expired or revoked. Run `mailagent auth` "
+                    "to re-authorise.\n\n"
+                    "If this keeps happening weekly, the OAuth app is still in "
+                    "'Testing' status, where Google expires refresh tokens after "
+                    "7 days. Fix it at Google Auth Platform -> Audience -> "
+                    "Publishing status -> Publish app."
+                ) from exc
+            TOKEN_PATH.unlink(missing_ok=True)
+            creds = None
 
     if not interactive:
         raise AuthError(
